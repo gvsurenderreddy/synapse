@@ -18,9 +18,7 @@ from synapse.util.async import ObservableDeferred
 from synapse.util import unwrapFirstError
 from synapse.util.caches.lrucache import LruCache
 from synapse.util.caches.treecache import TreeCache, iterate_tree_cache_entry
-from synapse.util.logcontext import (
-    PreserveLoggingContext, preserve_context_over_deferred, preserve_context_over_fn
-)
+from synapse.util import logcontext
 
 from . import DEBUG_CACHES, register_cache
 
@@ -290,6 +288,8 @@ class CacheDescriptor(object):
             if self.add_cache_context:
                 kwargs["cache_context"] = _CacheContext(cache, cache_key)
 
+            caller_context = logcontext.LoggingContext.current_context()
+
             try:
                 cached_result_d = cache.get(cache_key, callback=invalidate_callback)
 
@@ -308,10 +308,8 @@ class CacheDescriptor(object):
                         defer.returnValue(cached_result)
                     observer.addCallback(check_result)
 
-                return preserve_context_over_deferred(observer)
             except KeyError:
                 ret = defer.maybeDeferred(
-                    preserve_context_over_fn,
                     self.function_to_call,
                     obj, *args, **kwargs
                 )
@@ -322,10 +320,18 @@ class CacheDescriptor(object):
 
                 ret.addErrback(onErr)
 
+                # clear the logcontext before sharing the result with other
+                # callers via the cache
+                ret = logcontext.update_context_after_deferred(ret)
+
                 ret = ObservableDeferred(ret, consumeErrors=True)
                 cache.set(cache_key, ret, callback=invalidate_callback)
+                observer = ret.observe()
 
-                return preserve_context_over_deferred(ret.observe())
+            # the ObservableDeferred will callback with no logcontext: restore
+            # the caller's logcontext before returning.
+            return logcontext.update_context_after_deferred(
+                observer, caller_context)
 
         wrapped.invalidate = cache.invalidate
         wrapped.invalidate_all = cache.invalidate_all
@@ -400,6 +406,8 @@ class CacheListDescriptor(object):
             keyargs = [arg_dict[arg_nm] for arg_nm in self.arg_names]
             list_args = arg_dict[self.list_name]
 
+            caller_context = logcontext.LoggingContext.current_context()
+
             # cached is a dict arg -> deferred, where deferred results in a
             # 2-tuple (`arg`, `result`)
             results = {}
@@ -425,18 +433,20 @@ class CacheListDescriptor(object):
                 args_to_call[self.list_name] = missing
 
                 ret_d = defer.maybeDeferred(
-                    preserve_context_over_fn,
                     self.function_to_call,
                     **args_to_call
                 )
+
+                # clear the logcontext before sharing the result with other
+                # callers via the cache
+                ret_d = logcontext.update_context_after_deferred(ret_d)
 
                 ret_d = ObservableDeferred(ret_d)
 
                 # We need to create deferreds for each arg in the list so that
                 # we can insert the new deferred into the cache.
                 for arg in missing:
-                    with PreserveLoggingContext():
-                        observer = ret_d.observe()
+                    observer = ret_d.observe()
                     observer.addCallback(lambda r, arg: r.get(arg, None), arg)
 
                     observer = ObservableDeferred(observer)
@@ -463,13 +473,19 @@ class CacheListDescriptor(object):
                     results.update(res)
                     return results
 
-                return preserve_context_over_deferred(defer.gatherResults(
+                res = defer.gatherResults(
                     cached_defers.values(),
                     consumeErrors=True,
                 ).addCallback(update_results_dict).addErrback(
                     unwrapFirstError
-                ))
+                )
+
+                # the ObservableDeferred will callback with no logcontext:
+                # restore the caller's logcontext before returning.
+                return logcontext.update_context_after_deferred(res, caller_context)
             else:
+                # XXX how does this work? isn't it a completely different type
+                # to the above?
                 return results
 
         obj.__dict__[self.orig.__name__] = wrapped

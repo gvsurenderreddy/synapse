@@ -328,6 +328,36 @@ def preserve_context_over_deferred(deferred, context=None):
     return d
 
 
+def update_context_after_deferred(deferred, context=None):
+    """Given a deferred, add callbacks such that the given log context will be
+    set before any other callbacks are called.
+
+    This is similar to preserve_context_over_deferred, except the log context
+    is set permanently, rather than just for the duration of the callbacks.
+    It is therefore appropriate for restoring a caller's context when returning
+    a deferred which would otherwise excute in a different context.
+
+    (Other differences include a different default for `context`, and a bit
+    less overhead.)
+
+    Args:
+        deferred (twisted.internet.defer.Deferred): deferred to wrap
+        context (LoggingContext): context to assign. Defaults to the sentinel
+            context
+
+    Returns (twisted.internet.defer.Deferred): wrapped deferred
+    """
+    if context is None:
+        context = LoggingContext.sentinel
+
+    def cb(r):
+        LoggingContext.set_current_context(context)
+        return r
+
+    deferred.addBoth(cb)
+    return deferred
+
+
 def preserve_fn(f):
     """Ensures that function is called with correct context and that context is
     restored after return. Useful for wrapping functions that return a deferred
