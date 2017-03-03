@@ -132,15 +132,33 @@ class LoggingContext(object):
             None to avoid suppressing any exeptions that were thrown.
         """
         current = self.set_current_context(self.previous_context)
-        if current is not self:
-            if current is self.sentinel:
-                logger.debug("Expected logging context %s has been lost", self)
-            else:
-                logger.warn(
-                    "Current logging context %s is not expected context %s",
-                    current,
-                    self
-                )
+
+        # This is normal, because we replace the log context with the sentinel
+        # when we are waiting for external code.
+        #
+        # Example:
+        #
+        # def fun1():
+        #     with LoggingContext("fun1"):
+        #         fun2()
+        #
+        # @defer.inlineCallbacks
+        # def fun2():
+        #     yield synapse.util.async.sleep(0.1)
+        #
+        # fun2 replaces the log context with the sentinel while it waits, so
+        # fun1's LoggingContext will notice that the context has been replaced.
+        # and complain.
+
+        # if current is not self:
+        #     if current is self.sentinel:
+        #         logger.debug("Expected logging context %s has been lost", self)
+        #     else:
+        #         logger.warn(
+        #             "Current logging context %s is not expected context %s",
+        #             current,
+        #             self
+        #         )
         self.previous_context = None
         self.alive = False
 
@@ -237,18 +255,20 @@ class PreserveLoggingContext(object):
         """Restores the current logging context"""
         context = LoggingContext.set_current_context(self.current_context)
 
-        if context != self.new_context:
-            logger.debug(
-                "Unexpected logging context: %s is not %s",
-                context, self.new_context,
-            )
+        # this is normal, for the same reasons as LoggingContext.exit.
 
-        if self.current_context is not LoggingContext.sentinel:
-            if not self.current_context.alive:
-                logger.debug(
-                    "Restoring dead context: %s",
-                    self.current_context,
-                )
+        # if context != self.new_context:
+        #     logger.debug(
+        #         "Unexpected logging context: %s replaced %s",
+        #         context, self.new_context
+        #     )
+        #
+        # if self.current_context is not LoggingContext.sentinel:
+        #     if not self.current_context.alive:
+        #         logger.debug(
+        #             "Restoring dead context: %s",
+        #             self.current_context,
+        #         )
 
 
 class _PreservingContextDeferred(defer.Deferred):
